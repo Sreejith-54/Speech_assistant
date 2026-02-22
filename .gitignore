@@ -1,67 +1,47 @@
-# =========================
 # Python
-# =========================
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # Virtual environments
 .venv/
-env/
 venv/
+ENV/
 
-# =========================
-# Environment variables
-# =========================
-.env
-.env.*
-!.env.example
+# Node / Vite
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
 
-# =========================
-# OS files
-# =========================
+# Build / cache
+build/
+dist/
+.cache/
+.tmp/
+
+# Logs
+*.log
+
+# OS
 .DS_Store
 Thumbs.db
 
-# =========================
-# IDE / Editor
-# =========================
-.vscode/
-.idea/
-
-# =========================
-# Logs
-# =========================
-*.log
-
-# =========================
-# Build / distribution
-# =========================
-build/
-dist/
-*.egg-info/
-
-# =========================
-# Generated / Runtime Files
-# =========================
-backend/generated_videos/
-backend/concatenated_sequences/
-backend/data/
-
-# =========================
-# Large ASL assets (if not meant for repo)
-# =========================
+# Local data / outputs
+conversations/
 asl_video_library/
 asl_fingerspelling/
+sigml_lexicon/
 
-# =========================
-# Database
-# =========================
-*.sqlite3
-*.db
-
-# =========================
-# Temporary files
-# =========================
-*.tmp
-*.temp
+# IDE
+.vscode/
+.idea/
