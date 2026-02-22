@@ -17,6 +17,11 @@ htmlcov/
 venv/
 ENV/
 
+# Environment files
+.env
+*.env
+backend/.env
+
 # Node / Vite
 node_modules/
 frontend/node_modules/
