@@ -40,6 +40,10 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Max media size accepted when fetching video/audio from URL
+# Override with env var VIDEO_URL_MAX_SIZE_MB
+VIDEO_URL_MAX_SIZE_MB = int(os.getenv("VIDEO_URL_MAX_SIZE_MB", "300"))
+
 # WebSocket message types
 class MessageType:
     AUDIO = "audio"
@@ -505,6 +509,7 @@ class WebSocketManager:
             source: Dict[str, Any] = {}
             transcript: str = ""
             transcript_meta: Dict[str, Any] = {}
+            download_failure_reason = ""
 
             if video_url:
                 source = {"kind": "url", "value": video_url}
@@ -531,6 +536,7 @@ class WebSocketManager:
                     }
                 except Exception as ytdlp_error:
                     logger.warning(f"yt-dlp extraction failed for URL: {ytdlp_error}")
+                    download_failure_reason = str(ytdlp_error)
 
                     # 2) YouTube fallback: captions transcript
                     if self._is_youtube_url(video_url):
@@ -572,9 +578,10 @@ class WebSocketManager:
                         }
 
                     if not transcript.strip() and not media_bytes:
+                        detail = f" Reason: {download_failure_reason}" if download_failure_reason else ""
                         await self._send_error(
                             websocket,
-                            "Could not access this video URL. For YouTube/Instagram links, install yt-dlp and try public videos, or upload the video file directly."
+                            "Could not access this video URL. Try a public YouTube/Instagram video, or upload the video file directly." + detail
                         )
                         return
             elif video_data:
@@ -806,7 +813,7 @@ class WebSocketManager:
             lines.append(f"[{start}-{end}] {text}")
         return "\n".join(lines).strip()
 
-    def _download_video_url(self, video_url: str, max_size_mb: int = 50) -> bytes:
+    def _download_video_url(self, video_url: str, max_size_mb: int = VIDEO_URL_MAX_SIZE_MB) -> bytes:
         """Download video bytes from URL with a strict size cap."""
         max_size = max_size_mb * 1024 * 1024
         request = urllib.request.Request(video_url, headers={"User-Agent": "Mozilla/5.0"})
@@ -834,7 +841,7 @@ class WebSocketManager:
         except Exception:
             return False
 
-    def _download_video_with_ytdlp(self, video_url: str, max_size_mb: int = 80) -> tuple[bytes, str, str]:
+    def _download_video_with_ytdlp(self, video_url: str, max_size_mb: int = VIDEO_URL_MAX_SIZE_MB) -> tuple[bytes, str, str]:
         """
         Download media bytes from URL using yt-dlp for multi-platform support.
         Supports YouTube, Instagram, and many other providers.
@@ -852,21 +859,39 @@ class WebSocketManager:
             outtmpl = os.path.join(temp_dir, "media.%(ext)s")
             info: Dict[str, Any] = {}
             downloaded_path: Optional[str] = None
+            last_error: Optional[Exception] = None
 
             if ytdlp_module is not None:
-                ydl_opts = {
-                    "format": "bestaudio/best",
-                    "outtmpl": outtmpl,
-                    "noplaylist": True,
-                    "quiet": True,
-                    "no_warnings": True,
-                    "socket_timeout": 30,
-                }
+                module_attempts: List[Dict[str, Any]] = [
+                    {},
+                    {"extractor_args": {"youtube": {"player_client": ["android", "web"]}}},
+                    {"cookiesfrombrowser": ("chrome",)},
+                    {"cookiesfrombrowser": ("edge",)},
+                ]
 
-                with ytdlp_module.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(video_url, download=True)
-                    downloaded_path = ydl.prepare_filename(info)
-            else:
+                for attempt_opts in module_attempts:
+                    ydl_opts: Dict[str, Any] = {
+                        "format": "bestaudio/best",
+                        "outtmpl": outtmpl,
+                        "noplaylist": True,
+                        "quiet": True,
+                        "no_warnings": True,
+                        "socket_timeout": 30,
+                    }
+                    ydl_opts.update(attempt_opts)
+
+                    try:
+                        with ytdlp_module.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(video_url, download=True)
+                            downloaded_path = ydl.prepare_filename(info)
+
+                        if downloaded_path and os.path.exists(downloaded_path):
+                            break
+                    except Exception as exc:
+                        last_error = exc
+                        downloaded_path = None
+
+            if not downloaded_path:
                 candidate_commands: List[List[str]] = []
 
                 workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -884,26 +909,38 @@ class WebSocketManager:
                 if yt_dlp_executable:
                     candidate_commands.append([yt_dlp_executable])
 
-                subprocess_error: Optional[Exception] = None
+                cli_attempt_flags: List[List[str]] = [
+                    [],
+                    ["--extractor-args", "youtube:player_client=android,web"],
+                    ["--cookies-from-browser", "chrome"],
+                    ["--cookies-from-browser", "edge"],
+                ]
+
+                subprocess_error: Optional[Exception] = last_error
                 for base_cmd in candidate_commands:
-                    try:
-                        command = base_cmd + [
-                            "--no-playlist",
-                            "--no-warnings",
-                            "--socket-timeout", "30",
-                            "-f", "bestaudio/best",
-                            "-o", outtmpl,
-                            video_url,
-                        ]
-                        subprocess.run(command, check=True, capture_output=True, text=True)
-                        subprocess_error = None
+                    for extra_flags in cli_attempt_flags:
+                        try:
+                            command = base_cmd + [
+                                "--no-playlist",
+                                "--no-warnings",
+                                "--socket-timeout", "30",
+                                "-f", "bestaudio/best",
+                            ] + extra_flags + [
+                                "-o", outtmpl,
+                                video_url,
+                            ]
+                            subprocess.run(command, check=True, capture_output=True, text=True)
+                            subprocess_error = None
+                            break
+                        except Exception as exc:
+                            subprocess_error = exc
+
+                    if subprocess_error is None:
                         break
-                    except Exception as exc:
-                        subprocess_error = exc
 
                 if subprocess_error:
                     raise RuntimeError(
-                        "yt-dlp is not available in the active backend environment"
+                        f"Unable to download media with yt-dlp: {subprocess_error}"
                     ) from subprocess_error
 
             if not downloaded_path or not os.path.exists(downloaded_path):
