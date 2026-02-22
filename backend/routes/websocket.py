@@ -7,9 +7,13 @@ Handles WebSocket connections for bidirectional audio streaming.
 import json
 import logging
 import asyncio
+import importlib
 import numpy as np # type: ignore
 import base64
 import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -835,27 +839,74 @@ class WebSocketManager:
         Download media bytes from URL using yt-dlp for multi-platform support.
         Supports YouTube, Instagram, and many other providers.
         """
-        if yt_dlp is None:
-            raise RuntimeError("yt-dlp is not installed")
+        ytdlp_module = yt_dlp
+        if ytdlp_module is None:
+            try:
+                ytdlp_module = importlib.import_module("yt_dlp")
+            except Exception:
+                ytdlp_module = None
 
         max_size = max_size_mb * 1024 * 1024
 
         with tempfile.TemporaryDirectory(prefix="vocalis_video_") as temp_dir:
             outtmpl = os.path.join(temp_dir, "media.%(ext)s")
-            ydl_opts = {
-                "format": "bestaudio/best",
-                "outtmpl": outtmpl,
-                "noplaylist": True,
-                "quiet": True,
-                "no_warnings": True,
-                "socket_timeout": 30,
-            }
+            info: Dict[str, Any] = {}
+            downloaded_path: Optional[str] = None
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=True)
-                downloaded_path = ydl.prepare_filename(info)
+            if ytdlp_module is not None:
+                ydl_opts = {
+                    "format": "bestaudio/best",
+                    "outtmpl": outtmpl,
+                    "noplaylist": True,
+                    "quiet": True,
+                    "no_warnings": True,
+                    "socket_timeout": 30,
+                }
 
-            if not os.path.exists(downloaded_path):
+                with ytdlp_module.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(video_url, download=True)
+                    downloaded_path = ydl.prepare_filename(info)
+            else:
+                candidate_commands: List[List[str]] = []
+
+                workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+                workspace_venv_python = os.path.join(workspace_root, ".venv", "Scripts", "python.exe")
+                if os.path.exists(workspace_venv_python):
+                    candidate_commands.append([
+                        workspace_venv_python,
+                        "-m",
+                        "yt_dlp",
+                    ])
+
+                candidate_commands.append([sys.executable, "-m", "yt_dlp"])
+
+                yt_dlp_executable = shutil.which("yt-dlp")
+                if yt_dlp_executable:
+                    candidate_commands.append([yt_dlp_executable])
+
+                subprocess_error: Optional[Exception] = None
+                for base_cmd in candidate_commands:
+                    try:
+                        command = base_cmd + [
+                            "--no-playlist",
+                            "--no-warnings",
+                            "--socket-timeout", "30",
+                            "-f", "bestaudio/best",
+                            "-o", outtmpl,
+                            video_url,
+                        ]
+                        subprocess.run(command, check=True, capture_output=True, text=True)
+                        subprocess_error = None
+                        break
+                    except Exception as exc:
+                        subprocess_error = exc
+
+                if subprocess_error:
+                    raise RuntimeError(
+                        "yt-dlp is not available in the active backend environment"
+                    ) from subprocess_error
+
+            if not downloaded_path or not os.path.exists(downloaded_path):
                 # Some extractors may adjust extension/container
                 candidates = [
                     os.path.join(temp_dir, name)
